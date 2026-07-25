@@ -1,0 +1,5 @@
+# Feedback Loop Log for Ember Swarm Prompts
+# Each line is a JSON object representing one feedback event
+# Format: {timestamp, prompt_id, agent, task, success, confidence_update, note}
+# This file is auto-appended to during Swarm testing; do not edit manually.
+

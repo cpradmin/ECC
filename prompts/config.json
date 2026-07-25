@@ -1,0 +1,76 @@
+{
+  "version": "1.0.0",
+  "name": "Ember Swarm Prompts Library",
+  "description": "Cross-harness prompt library built on ECC continuous-learning system",
+  "domains": [
+    {
+      "name": "router-prompts",
+      "description": "Intent classification and 6-domain routing logic",
+      "specialist": "Router",
+      "priority": "critical"
+    },
+    {
+      "name": "conversation-prompts",
+      "description": "Dialogue, narrative, teaching, explanation",
+      "specialist": "Eve",
+      "priority": "high"
+    },
+    {
+      "name": "go-coding-prompts",
+      "description": "Systems programming, infrastructure code, performance",
+      "specialist": "Go Specialist",
+      "priority": "high"
+    },
+    {
+      "name": "python-coding-prompts",
+      "description": "Data processing, automation, ML workflows",
+      "specialist": "Python Specialist",
+      "priority": "high"
+    },
+    {
+      "name": "iac-prompts",
+      "description": "Infrastructure as code, cloud deployment, configuration",
+      "specialist": "IaC Specialist",
+      "priority": "high"
+    },
+    {
+      "name": "memory-prompts",
+      "description": "Knowledge retrieval, context synthesis, RAG integration",
+      "specialist": "Trinity/Memory",
+      "priority": "high"
+    }
+  ],
+  "storage": {
+    "location": "${XDG_DATA_HOME}/ecc-prompts",
+    "format": "YAML with frontmatter",
+    "instincts_per_domain": "separate files with NN-prompt-name.yaml naming"
+  },
+  "confidence": {
+    "min": 0.3,
+    "max": 0.95,
+    "success_increment": 0.05,
+    "failure_decrement": 0.1,
+    "promotion_threshold": 0.8,
+    "promotion_min_agents": 3
+  },
+  "feedback": {
+    "location": "projects/ember-swarm/feedback.jsonl",
+    "format": "JSONL (one JSON object per line)",
+    "fields": ["timestamp", "prompt_id", "agent", "task", "success", "confidence_update", "note"]
+  },
+  "mcp_integration": {
+    "service": "prompts-mcp",
+    "language": "Go",
+    "endpoints": [
+      "/mcp/prompts/list",
+      "/mcp/prompts/get/{id}",
+      "/mcp/prompts/search",
+      "/mcp/prompts/feedback",
+      "/mcp/prompts/export",
+      "/mcp/prompts/import"
+    ]
+  },
+  "phase": 1,
+  "status": "Foundation: Directory structure and templates created",
+  "next_phase": "MCP Service Implementation (Phase 2)"
+}
