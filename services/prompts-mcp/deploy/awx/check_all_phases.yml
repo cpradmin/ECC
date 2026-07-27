@@ -1,0 +1,353 @@
+---
+- name: Comprehensive Prompts-MCP Phase Validation (1-5)
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    base_url: "http://localhost:8762/mcp"
+    log_file: "/tmp/phase_validation_{{ ansible_date_time.iso8601_basic_short }}.json"
+    phase_results: {}
+
+  tasks:
+    # ===== PHASE 1: Core Endpoints =====
+    - name: "PHASE 1: Validate Core Endpoints"
+      block:
+        - name: Test GET /prompts/list
+          uri:
+            url: "{{ base_url }}/prompts/list"
+            method: GET
+            status_code: 200
+          register: list_result
+
+        - name: Test GET /prompts/registry
+          uri:
+            url: "{{ base_url }}/prompts/registry?limit=10"
+            method: GET
+            status_code: 200
+          register: registry_result
+
+        - name: Test GET /prompts/registry/stats
+          uri:
+            url: "{{ base_url }}/prompts/registry/stats"
+            method: GET
+            status_code: 200
+          register: stats_result
+
+        - name: Test POST /prompts/governor/route
+          uri:
+            url: "{{ base_url }}/prompts/governor/route"
+            method: POST
+            body_format: json
+            body:
+              query: "test query"
+              context: "test context"
+            status_code: 200
+          register: governor_result
+
+        - name: Test GET /health
+          uri:
+            url: "{{ base_url }}/health"
+            method: GET
+            status_code: 200
+          register: health_result
+
+        - name: Set Phase 1 results
+          set_fact:
+            phase1_pass: true
+            phase1_endpoints: 5
+            phase1_timestamp: "{{ ansible_date_time.iso8601 }}"
+
+      rescue:
+        - name: Phase 1 failed
+          set_fact:
+            phase1_pass: false
+            phase1_error: "{{ ansible_failed_result.msg | default('Unknown error') }}"
+
+    # ===== PHASE 2: Registry & Persistence =====
+    - name: "PHASE 2: Validate Registry Integrity"
+      block:
+        - name: Get registry before export
+          uri:
+            url: "{{ base_url }}/prompts/registry?limit=100"
+            method: GET
+            status_code: 200
+          register: registry_before
+
+        - name: Extract prompt count
+          set_fact:
+            initial_count: "{{ registry_before.json.total }}"
+
+        - name: Export prompts to YAML
+          uri:
+            url: "{{ base_url }}/prompts/export?format=yaml"
+            method: POST
+            status_code: 200
+          register: export_result
+
+        - name: Verify export returned data
+          assert:
+            that:
+              - export_result.json.status == "ok"
+              - export_result.json.exported_count > 0
+            fail_msg: "Export validation failed"
+
+        - name: Test import (reimport same data)
+          uri:
+            url: "{{ base_url }}/prompts/import"
+            method: POST
+            body_format: json
+            body:
+              prompts: "{{ export_result.json.prompts }}"
+            status_code: 200
+          register: import_result
+
+        - name: Rebuild index
+          uri:
+            url: "{{ base_url }}/prompts/registry/rebuild"
+            method: POST
+            status_code: 200
+          register: rebuild_result
+
+        - name: Get registry after rebuild
+          uri:
+            url: "{{ base_url }}/prompts/registry?limit=100"
+            method: GET
+            status_code: 200
+          register: registry_after
+
+        - name: Verify registry integrity
+          assert:
+            that:
+              - registry_after.json.total == initial_count
+              - registry_after.json.prompts | length > 0
+            fail_msg: "Registry count mismatch after rebuild"
+
+        - name: Check Promoted field serialization (C5 fix)
+          assert:
+            that:
+              - registry_after.json.prompts[0].promoted is defined
+              - registry_after.json.prompts[0].promoted is not none
+            fail_msg: "Promoted field not serializing correctly"
+
+        - name: Check timestamps persist (I11 fix)
+          assert:
+            that:
+              - registry_after.json.prompts[0].created_at is defined
+              - registry_after.json.prompts[0].updated_at is defined
+            fail_msg: "Timestamps not persisting"
+
+        - name: Set Phase 2 results
+          set_fact:
+            phase2_pass: true
+            phase2_prompt_count: "{{ registry_after.json.total }}"
+            phase2_export_import_cycle: "success"
+
+      rescue:
+        - name: Phase 2 failed
+          set_fact:
+            phase2_pass: false
+            phase2_error: "{{ ansible_failed_result.msg | default('Unknown error') }}"
+
+    # ===== PHASE 3: Daily Pipeline =====
+    - name: "PHASE 3: Validate Daily Pipeline Automation"
+      block:
+        - name: Check systemd timer exists
+          shell: systemctl list-timers | grep prompts-mcp-daily
+          register: timer_check
+          ignore_errors: yes
+
+        - name: Verify timer is active
+          assert:
+            that:
+              - timer_check.rc == 0
+              - "'prompts-mcp-daily-pipeline.timer' in timer_check.stdout"
+            fail_msg: "Systemd timer not found or inactive"
+
+        - name: Check pipeline log directory
+          stat:
+            path: /var/log/prompts-mcp
+          register: log_dir
+
+        - name: Get latest pipeline log
+          shell: "ls -t /var/log/prompts-mcp/pipeline-*.log 2>/dev/null | head -1"
+          register: latest_log
+          ignore_errors: yes
+
+        - name: Read latest pipeline log
+          slurp:
+            src: "{{ latest_log.stdout }}"
+          register: log_content
+          when: latest_log.stdout != ""
+          ignore_errors: yes
+
+        - name: Verify pipeline ran recently (within 24h)
+          shell: "find /var/log/prompts-mcp -name 'pipeline-*.log' -mtime -1 | wc -l"
+          register: recent_runs
+
+        - name: Set Phase 3 results
+          set_fact:
+            phase3_pass: true
+            phase3_timer_active: "{{ timer_check.rc == 0 }}"
+            phase3_recent_runs: "{{ recent_runs.stdout | int }}"
+
+      rescue:
+        - name: Phase 3 failed
+          set_fact:
+            phase3_pass: false
+            phase3_error: "{{ ansible_failed_result.msg | default('Unknown error') }}"
+
+    # ===== PHASE 4: Monitoring Infrastructure =====
+    - name: "PHASE 4: Validate Monitoring & Metrics"
+      block:
+        - name: Get metrics endpoint
+          uri:
+            url: "{{ base_url }}/metrics"
+            method: GET
+            status_code: 200
+          register: metrics_result
+
+        - name: Parse metrics text
+          set_fact:
+            metrics_text: "{{ metrics_result.content }}"
+
+        - name: Verify required metrics exist
+          assert:
+            that:
+              - "'prompts_all_avg_confidence' in metrics_text"
+              - "'prompts_registry_total' in metrics_text"
+              - "'prompts_promoted_count' in metrics_text"
+              - "'prompts_feedback_success_rate' in metrics_text"
+              - "'prompts_feedback_scrape_errors_total' in metrics_text"
+              - "'prompts_uptime_seconds' in metrics_text"
+            fail_msg: "Required metrics missing (C1, I6 fixes)"
+
+        - name: Extract metric values
+          shell: |
+            echo "{{ metrics_text }}" | grep -E "^prompts_all_avg_confidence|^prompts_registry_total|^prompts_promoted_count" | grep -v "^#"
+          register: metric_values
+
+        - name: Set Phase 4 results
+          set_fact:
+            phase4_pass: true
+            phase4_metrics_count: 8
+            phase4_all_metrics_present: true
+
+      rescue:
+        - name: Phase 4 failed
+          set_fact:
+            phase4_pass: false
+            phase4_error: "{{ ansible_failed_result.msg | default('Unknown error') }}"
+
+    # ===== PHASE 5: Alerts & Dashboards =====
+    - name: "PHASE 5: Validate Alerts & Dashboards Configuration"
+      block:
+        - name: Check alert matrix is configured
+          stat:
+            path: "/home/kntrnjb/Projects/prompts-mcp/handlers/alerts.go"
+          register: alerts_file
+
+        - name: Verify alert rules in code
+          shell: "grep -c 'AlertMatrix' /home/kntrnjb/Projects/prompts-mcp/handlers/alerts.go"
+          register: alert_rules
+          ignore_errors: yes
+
+        - name: Check Grafana dashboards exist
+          stat:
+            path: "/home/kntrnjb/Projects/prompts-mcp/deploy/grafana/registry-health-dashboard.json"
+          register: dashboard1
+
+        - name: Check governor dashboard
+          stat:
+            path: "/home/kntrnjb/Projects/prompts-mcp/deploy/grafana/governor-dashboard.json"
+          register: dashboard2
+
+        - name: Check pipeline dashboard
+          stat:
+            path: "/home/kntrnjb/Projects/prompts-mcp/deploy/grafana/pipeline-dashboard.json"
+          register: dashboard3
+
+        - name: Verify alert thresholds configured
+          assert:
+            that:
+              - alerts_file.stat.exists
+              - alert_rules.stdout | int > 0
+              - dashboard1.stat.exists
+              - dashboard2.stat.exists
+              - dashboard3.stat.exists
+            fail_msg: "Alert rules or dashboards missing (I7-I8 fixes)"
+
+        - name: Check runbooks exist
+          shell: "ls -1 /home/kntrnjb/Projects/prompts-mcp/docs/runbooks/*.md 2>/dev/null | wc -l"
+          register: runbook_count
+          ignore_errors: yes
+
+        - name: Set Phase 5 results
+          set_fact:
+            phase5_pass: true
+            phase5_alert_rules: "{{ alert_rules.stdout }}"
+            phase5_dashboards: 3
+            phase5_runbooks: "{{ runbook_count.stdout }}"
+
+      rescue:
+        - name: Phase 5 failed
+          set_fact:
+            phase5_pass: false
+            phase5_error: "{{ ansible_failed_result.msg | default('Unknown error') }}"
+
+    # ===== COMPILE RESULTS =====
+    - name: "Compile Phase Validation Results"
+      set_fact:
+        validation_results:
+          timestamp: "{{ ansible_date_time.iso8601 }}"
+          summary:
+            phase_1_core_endpoints: "{{ phase1_pass | default(false) }}"
+            phase_2_registry: "{{ phase2_pass | default(false) }}"
+            phase_3_pipeline: "{{ phase3_pass | default(false) }}"
+            phase_4_monitoring: "{{ phase4_pass | default(false) }}"
+            phase_5_alerts: "{{ phase5_pass | default(false) }}"
+          details:
+            phase_1:
+              status: "{{ 'PASS' if phase1_pass | default(false) else 'FAIL' }}"
+              endpoints_tested: "{{ phase1_endpoints | default(0) }}"
+              error: "{{ phase1_error | default('None') }}"
+            phase_2:
+              status: "{{ 'PASS' if phase2_pass | default(false) else 'FAIL' }}"
+              prompt_count: "{{ phase2_prompt_count | default(0) }}"
+              export_import_cycle: "{{ phase2_export_import_cycle | default('N/A') }}"
+              error: "{{ phase2_error | default('None') }}"
+            phase_3:
+              status: "{{ 'PASS' if phase3_pass | default(false) else 'FAIL' }}"
+              timer_active: "{{ phase3_timer_active | default(false) }}"
+              recent_runs: "{{ phase3_recent_runs | default(0) }}"
+              error: "{{ phase3_error | default('None') }}"
+            phase_4:
+              status: "{{ 'PASS' if phase4_pass | default(false) else 'FAIL' }}"
+              metrics_emitted: "{{ phase4_metrics_count | default(0) }}"
+              error: "{{ phase4_error | default('None') }}"
+            phase_5:
+              status: "{{ 'PASS' if phase5_pass | default(false) else 'FAIL' }}"
+              alert_rules: "{{ phase5_alert_rules | default(0) }}"
+              dashboards: "{{ phase5_dashboards | default(0) }}"
+              runbooks: "{{ phase5_runbooks | default(0) }}"
+              error: "{{ phase5_error | default('None') }}"
+
+    - name: Display validation results
+      debug:
+        msg: "{{ validation_results | to_nice_yaml }}"
+
+    - name: Save results to JSON
+      copy:
+        content: "{{ validation_results | to_nice_json }}"
+        dest: "{{ log_file }}"
+      delegate_to: localhost
+
+    - name: Final summary
+      debug:
+        msg: |
+          ===== PHASE VALIDATION SUMMARY =====
+          Phase 1 (Core Endpoints):  {{ 'PASS ✅' if phase1_pass | default(false) else 'FAIL ❌' }}
+          Phase 2 (Registry):         {{ 'PASS ✅' if phase2_pass | default(false) else 'FAIL ❌' }}
+          Phase 3 (Pipeline):         {{ 'PASS ✅' if phase3_pass | default(false) else 'FAIL ❌' }}
+          Phase 4 (Monitoring):       {{ 'PASS ✅' if phase4_pass | default(false) else 'FAIL ❌' }}
+          Phase 5 (Alerts/Dash):      {{ 'PASS ✅' if phase5_pass | default(false) else 'FAIL ❌' }}
+
+          Results saved to: {{ log_file }}

@@ -1,0 +1,56 @@
+---
+- name: Prompts-MCP Registry Health Check
+  hosts: localhost
+  gather_facts: no
+  vars:
+    prompts_mcp_url: "http://localhost:8762"
+    confidence_warning_threshold: 0.70
+    confidence_critical_threshold: 0.50
+
+  tasks:
+    # I1 FIX: Assert status 200, fail distinctly on unavailable service
+    - name: Query Registry Metrics
+      uri:
+        url: "{{ prompts_mcp_url }}/mcp/metrics"
+        method: GET
+        status_code: 200
+      register: metrics_response
+
+    # I1 FIX: Only parse if request succeeded (no ignore_errors)
+    - name: Parse metrics
+      set_fact:
+        registry_total: "{{ metrics_response.content | regex_search('prompts_registry_total (\\d+)') | regex_replace('.*?(\\d+).*', '\\1') }}"
+        avg_confidence_str: "{{ metrics_response.content | regex_search('prompts_all_avg_confidence ([0-9.]+)') | regex_replace('.*?([0-9.]+).*', '\\1') }}"
+        promoted_count_str: "{{ metrics_response.content | regex_search('prompts_promoted_count (\\d+)') | regex_replace('.*?(\\d+).*', '\\1') }}"
+
+    - name: Convert to float
+      set_fact:
+        avg_confidence: "{{ avg_confidence_str | float(0.0) }}"
+        promoted_count: "{{ promoted_count_str | int(0) }}"
+
+    - name: Log metrics
+      debug:
+        msg: |
+          Registry Health Check
+          Total Prompts: {{ registry_total }}
+          Average Confidence: {{ avg_confidence | round(2) }}
+          Promoted Count (≥0.8): {{ promoted_count }}
+
+    - name: Alert if confidence too low (WARNING)
+      debug:
+        msg: "⚠️  WARNING: Registry average confidence is {{ avg_confidence | round(2) }} (threshold: {{ confidence_warning_threshold }})"
+      when: avg_confidence < confidence_warning_threshold and avg_confidence >= confidence_critical_threshold
+
+    - name: Alert if confidence critical (CRITICAL)
+      fail:
+        msg: "🔴 CRITICAL: Registry avg confidence too low: {{ avg_confidence | round(2) }} (threshold: {{ confidence_critical_threshold }})"
+      when: avg_confidence < confidence_critical_threshold
+
+    - name: Alert if no promoted prompts
+      debug:
+        msg: "⚠️  WARNING: No prompts with ≥0.8 confidence - routing may be limited"
+      when: promoted_count == 0
+
+    - name: Success message
+      debug:
+        msg: "✅ Registry health check passed. {{ registry_total }} prompts, avg confidence {{ avg_confidence | round(2) }}"

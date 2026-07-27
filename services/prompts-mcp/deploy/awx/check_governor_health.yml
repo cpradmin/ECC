@@ -1,0 +1,47 @@
+---
+- name: Prompts-MCP Governor Routing Health Check
+  hosts: localhost
+  gather_facts: no
+  vars:
+    prompts_mcp_url: "http://localhost:8762"
+    success_rate_warning_threshold: 0.80
+
+  tasks:
+    # I1 FIX: Assert status 200, fail distinctly on unavailable service
+    - name: Query Governor Intelligence
+      uri:
+        url: "{{ prompts_mcp_url }}/mcp/prompts/governor/intelligence"
+        method: GET
+        status_code: 200
+      register: intelligence_response
+
+    # I1 FIX: Only parse if request succeeded (no ignore_errors)
+    - name: Parse routing intelligence
+      set_fact:
+        high_confidence_domains: "{{ intelligence_response.json.high_confidence_domains | default([]) }}"
+        low_confidence_domains: "{{ intelligence_response.json.low_confidence_domains | default([]) }}"
+        total_prompts: "{{ intelligence_response.json.total_prompts | default(0) }}"
+
+    - name: Log intelligence
+      debug:
+        msg: |
+          Governor Routing Intelligence
+          High-Confidence Domains: {{ high_confidence_domains | length }}
+            {{ high_confidence_domains | to_nice_yaml }}
+          Low-Confidence Domains: {{ low_confidence_domains | length }}
+            {{ low_confidence_domains | to_nice_yaml }}
+          Total Prompts: {{ total_prompts }}
+
+    - name: Alert if no high-confidence domains
+      fail:
+        msg: "🔴 CRITICAL: No high-confidence domains found! Governor routing will fail."
+      when: high_confidence_domains | length == 0
+
+    - name: Warn if many low-confidence domains
+      debug:
+        msg: "⚠️  WARNING: {{ low_confidence_domains | length }} domains have low confidence"
+      when: low_confidence_domains | length > 3
+
+    - name: Success message
+      debug:
+        msg: "✅ Governor health check passed. {{ high_confidence_domains | length }} high-confidence domains available"

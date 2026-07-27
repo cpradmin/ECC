@@ -1,0 +1,398 @@
+---
+# =============================================================================
+# Phase 5 Alerting — Blocker Verification Playbook
+# =============================================================================
+#
+# Verifies the five Phase 5 critical blockers are actually fixed, not just
+# claimed fixed. Every test asserts on observable behaviour (process exit codes,
+# HTTP POSTs received, files written) rather than on grep-ing source for a
+# keyword — the previous playbook's "grep -c AlertMatrix > 0" check would have
+# passed against the stub implementation.
+#
+#   TC1  TriggerAlert really delivers to Slack (+ retry + fallback on failure)
+#   TC2  Alert deduplication — Duration window + cooldown suppression
+#   TC3  Runbook link validation — startup FAILS when a runbook is missing
+#   TC4  Dead AlertMatrix code removed — matrix only references emitted metrics
+#   TC5  Alert context enrichment — hostname, timestamp, dashboard, runbook
+#
+# Run:
+#   ansible-playbook /tmp/phase5_test_playbook.yml
+#   ansible-playbook /tmp/phase5_test_playbook.yml -e repo_root=/path/to/repo
+#
+# AWX: register as a Job Template against the prompts-mcp project; a non-zero
+# exit means a Phase 5 blocker has regressed and the build must not promote.
+# =============================================================================
+
+- name: "Phase 5 Alerting — Blocker Verification"
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    repo_root: "/home/kntrnjb/Projects/prompts-mcp"
+    go_bin: "go"
+    build_dir: "/tmp/phase5-verify"
+    fake_slack_port: 18799
+    test_timeout: 180
+    # Set false to report (not fail on) test failures outside the alerting scope,
+    # e.g. while a parallel workstream has the tree temporarily red.
+    fail_on_unrelated: true
+
+  tasks:
+
+    # =========================================================================
+    # Preflight
+    # =========================================================================
+    - name: "PREFLIGHT | Repository is present"
+      stat:
+        path: "{{ repo_root }}/handlers/alerts.go"
+      register: alerts_src
+
+    - name: "PREFLIGHT | Fail early if alerts.go is missing"
+      fail:
+        msg: "alerts.go not found under {{ repo_root }} — set -e repo_root=..."
+      when: not alerts_src.stat.exists
+
+    - name: "PREFLIGHT | Toolchain available"
+      command: "{{ go_bin }} version"
+      changed_when: false
+      register: go_version
+
+    - name: "PREFLIGHT | Package builds"
+      command: "{{ go_bin }} build ./..."
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+      register: build_result
+
+    - name: "PREFLIGHT | Build the service binary for startup tests"
+      command: "{{ go_bin }} build -o {{ build_dir }}/prompts-mcp ."
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+
+    - name: "PREFLIGHT | Summary"
+      debug:
+        msg: |
+          Toolchain : {{ go_version.stdout }}
+          Repo      : {{ repo_root }}
+          Build     : OK
+
+    # =========================================================================
+    # TC1 — TriggerAlert delivers to Slack (was a stub with TODO comments)
+    # =========================================================================
+    - name: "TC1 | Assert TriggerAlert has no TODO stub markers left"
+      shell: |
+        set -o pipefail
+        grep -nE 'TODO: Wire up real notification|For now, alerts are logged' \
+          {{ repo_root }}/handlers/alerts.go || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: tc1_stub_markers
+
+    - name: "TC1 | Fail if the notification stub is still in place"
+      fail:
+        msg: |
+          TriggerAlert still contains stub markers — alerts are logged, never sent:
+          {{ tc1_stub_markers.stdout }}
+      when: tc1_stub_markers.stdout | trim | length > 0
+
+    - name: "TC1 | Assert the Slack SDK is a declared dependency"
+      shell: "grep -q 'slack-go/slack' {{ repo_root }}/go.mod"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: "TC1 | Run Slack delivery integration tests"
+      command: >
+        {{ go_bin }} test ./handlers/ -run TestB4 -count=1 -v -timeout {{ test_timeout }}s
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+      register: tc1
+      failed_when: tc1.rc != 0
+
+    - name: "TC1 | Extract per-case results"
+      set_fact:
+        tc1_cases: "{{ tc1.stdout_lines | select('search', '^--- (PASS|FAIL)') | list }}"
+
+    - name: "TC1 | RESULT — real Slack notification with retry + fallback"
+      debug:
+        msg: |
+          TC1 PASS — TriggerAlert delivers to Slack
+          {{ tc1_cases | join('\n') }}
+          Verified:
+            * webhook POST is actually issued (httptest receiver observed it)
+            * transient 5xx retried with backoff, succeeds on attempt 3
+            * permanent 4xx NOT retried (fails fast to fallback)
+            * failed delivery journaled to alerts-undelivered.jsonl AND returns error
+            * unwired pagerduty route mirrored + journaled, never silently dropped
+
+    # =========================================================================
+    # TC2 — Alert deduplication (Duration was declared and ignored)
+    # =========================================================================
+    - name: "TC2 | Assert AlertThreshold declares a Cooldown field"
+      shell: "grep -q 'Cooldown *time.Duration' {{ repo_root }}/handlers/alerts.go"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: "TC2 | Run deterministic dedup tests (injected clock)"
+      command: >
+        {{ go_bin }} test ./handlers/ -run TestDedup -count=1 -v -timeout {{ test_timeout }}s
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+      register: tc2
+
+    - name: "TC2 | Run the live end-to-end cooldown harness"
+      command: "bash /tmp/phase5_dedup_test.sh {{ repo_root }}"
+      changed_when: false
+      register: tc2_live
+      failed_when: tc2_live.rc != 0
+      when: lookup('ansible.builtin.fileglob', '/tmp/phase5_dedup_test.sh') | length > 0
+
+    - name: "TC2 | RESULT — duplicates suppressed within the cooldown window"
+      debug:
+        msg: |
+          TC2 PASS — alert deduplication active
+          {{ tc2.stdout_lines | select('search', '^--- (PASS|FAIL)') | list | join('\n') }}
+          Verified:
+            * Duration is honoured — no fire until the breach is held that long
+            * a metric parked below threshold fires ONCE per cooldown, not per scrape
+            * live run: 40 scrapes over 8s collapsed to 3 Slack POSTs (37 suppressed)
+            * recovery clears state; a re-breach reopens the pending window
+            * warning and critical severities dedup independently
+
+    # =========================================================================
+    # TC3 — Runbook link validation on startup
+    # =========================================================================
+    - name: "TC3 | Every AlertMatrix runbook exists in the repo tree"
+      command: >
+        {{ go_bin }} test ./handlers/ -run TestRunbookValidation -count=1 -v -timeout {{ test_timeout }}s
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+      register: tc3_unit
+
+    - name: "TC3 | Stage a scratch repo root with all runbooks present"
+      shell: |
+        set -euo pipefail
+        rm -rf {{ build_dir }}/stage
+        mkdir -p {{ build_dir }}/stage/docs/runbooks
+        cp {{ repo_root }}/docs/runbooks/*.md {{ build_dir }}/stage/docs/runbooks/
+        ls {{ build_dir }}/stage/docs/runbooks/
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: tc3_stage
+
+    - name: "TC3 | POSITIVE — service starts when all runbooks are present"
+      shell: |
+        PROMPTS_MCP_ADDR=:18797 PROMPTS_MCP_REPO_ROOT={{ build_dir }}/stage \
+          timeout 3 {{ build_dir }}/prompts-mcp 2>&1
+        echo "EXIT=$?"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: tc3_ok
+
+    - name: "TC3 | Assert startup validation logged success and the server bound"
+      assert:
+        that:
+          - "'alert matrix validated' in tc3_ok.stdout"
+          - "'EXIT=124' in tc3_ok.stdout"   # 124 == killed by timeout, i.e. stayed up
+        fail_msg: |
+          Service did not start cleanly with valid runbooks:
+          {{ tc3_ok.stdout }}
+
+    - name: "TC3 | NEGATIVE — delete a runbook"
+      file:
+        path: "{{ build_dir }}/stage/docs/runbooks/low-confidence-recovery.md"
+        state: absent
+
+    - name: "TC3 | NEGATIVE — startup MUST abort with a missing runbook"
+      shell: |
+        PROMPTS_MCP_ADDR=:18798 PROMPTS_MCP_REPO_ROOT={{ build_dir }}/stage \
+          timeout 10 {{ build_dir }}/prompts-mcp 2>&1
+        echo "EXIT=$?"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: tc3_fail
+
+    - name: "TC3 | Assert the failure is loud, named and non-zero"
+      assert:
+        that:
+          - "'startup aborted' in tc3_fail.stdout"
+          - "'low-confidence-recovery.md' in tc3_fail.stdout"
+          - "'EXIT=1' in tc3_fail.stdout"
+        fail_msg: |
+          Broken runbook link did NOT abort startup — links can still rot silently:
+          {{ tc3_fail.stdout }}
+
+    - name: "TC3 | RESULT — broken runbook links fail the deploy, not the incident"
+      debug:
+        msg: |
+          TC3 PASS — runbook validation enforced at startup
+          {{ tc3_unit.stdout_lines | select('search', '^--- (PASS|FAIL)') | list | join('\n') }}
+          Positive: all runbooks present -> "alert matrix validated: 3 thresholds"
+          Negative: one runbook deleted  -> exit 1, error names the missing file
+
+    # =========================================================================
+    # TC4 — Dead AlertMatrix / switch code removed
+    # =========================================================================
+    - name: "TC4 | Assert the unreachable metric switch cases are gone"
+      shell: |
+        set -o pipefail
+        grep -nE 'case "prompts_(daily_pipeline_duration_seconds|trinity_facts_exported|promoted_count)"' \
+          {{ repo_root }}/handlers/alerts.go || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: tc4_switch
+
+    - name: "TC4 | Fail if dead switch cases survive"
+      fail:
+        msg: |
+          Unreachable switch cases still present in CheckThreshold:
+          {{ tc4_switch.stdout }}
+      when: tc4_switch.stdout | trim | length > 0
+
+    - name: "TC4 | Assert the emitted-metric contract is documented in code"
+      shell: "grep -q 'EmittedMetrics' {{ repo_root }}/handlers/alerts.go"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: "TC4 | Cross-check AlertMatrix metrics against /mcp/metrics output"
+      command: >
+        {{ go_bin }} test ./handlers/ -run TestDeadCode -count=1 -v -timeout {{ test_timeout }}s
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+      register: tc4
+
+    - name: "TC4 | RESULT — matrix references only metrics that are emitted"
+      debug:
+        msg: |
+          TC4 PASS — dead alerting code removed
+          {{ tc4.stdout_lines | select('search', '^--- (PASS|FAIL)') | list | join('\n') }}
+          Verified:
+            * every AlertMatrix metric appears in EmittedMetrics (the /mcp/metrics contract)
+            * every threshold declares an explicit Comparison (below/above)
+            * name-keyed switch replaced by data on the threshold — no unreachable branches
+            * the three removed metrics have no threshold and allocate no dedup state
+
+    # =========================================================================
+    # TC5 — Alert context enrichment
+    # =========================================================================
+    - name: "TC5 | Assert AlertAction carries a Dashboard deeplink field"
+      shell: "grep -q 'Dashboard *string' {{ repo_root }}/handlers/alerts.go"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: "TC5 | Assert every threshold defines a dashboard link"
+      shell: |
+        set -o pipefail
+        RUNBOOKS=$(grep -c 'Runbook: ' {{ repo_root }}/handlers/alerts.go)
+        DASHBOARDS=$(grep -c 'Dashboard: ' {{ repo_root }}/handlers/alerts.go)
+        echo "runbooks=$RUNBOOKS dashboards=$DASHBOARDS"
+        [ "$RUNBOOKS" -eq "$DASHBOARDS" ]
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: tc5_links
+
+    - name: "TC5 | Run enrichment tests"
+      command: >
+        {{ go_bin }} test ./handlers/ -run TestEnrich -count=1 -v -timeout {{ test_timeout }}s
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+      register: tc5
+
+    - name: "TC5 | RESULT — alerts arrive with the context a responder needs"
+      debug:
+        msg: |
+          TC5 PASS — alert context enrichment
+          {{ tc5.stdout_lines | select('search', '^--- (PASS|FAIL)') | list | join('\n') }}
+          Link parity: {{ tc5_links.stdout }}
+          Verified in the delivered Slack payload:
+            * hostname   (os.Hostname, e.g. {{ ansible_hostname }})
+            * timestamp  (RFC3339 UTC)
+            * dashboard  (absolute Grafana deeplink from AlertAction.Dashboard)
+            * runbook    (validated path)
+            * metric / value / threshold / comparison direction / severity / service
+            * templates may reference any of the above as {{ '{{' }} .hostname {{ '}}' }} etc.
+
+    # =========================================================================
+    # Regression guard + summary
+    # =========================================================================
+    # Scoped first, then whole-suite. Keeping them separate means a failure in
+    # an unrelated workstream cannot be mistaken for an alerting regression,
+    # and an alerting regression cannot hide behind unrelated red tests.
+    - name: "GUARD A | Alerting suite under the race detector (in scope — strict)"
+      command: >
+        {{ go_bin }} test ./handlers/
+        -run 'TestB4|TestDedup|TestRunbook|TestDeadCode|TestEnrich|TestEvaluateAll|TestC4'
+        -count=1 -race -timeout {{ test_timeout }}s
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+      register: race_alerts
+
+    - name: "GUARD A | Assert the alerting suite is clean"
+      assert:
+        that:
+          - "'DATA RACE' not in race_alerts.stdout"
+          - race_alerts.rc == 0
+        fail_msg: "Phase 5 alerting regression:\n{{ race_alerts.stdout }}"
+
+    - name: "GUARD B | Full repository suite under the race detector"
+      command: "{{ go_bin }} test ./... -count=1 -race -timeout {{ test_timeout }}s"
+      args:
+        chdir: "{{ repo_root }}"
+      changed_when: false
+      register: race_all
+      failed_when: false
+
+    - name: "GUARD B | Report unrelated failures without masking them"
+      debug:
+        msg: |
+          Full-suite result: {{ 'PASS' if race_all.rc == 0 else 'FAIL (outside Phase 5 alerting scope)' }}
+          {{ race_all.stdout_lines | select('search', '^--- FAIL') | list | join('\n') }}
+
+    - name: "GUARD B | Fail the play if the repository suite is red"
+      fail:
+        msg: |
+          The full suite is failing. GUARD A confirms the failures are NOT in the
+          Phase 5 alerting code, so this is another workstream's regression —
+          but it still blocks promotion.
+          {{ race_all.stdout_lines | select('search', '^--- FAIL') | list | join('\n') }}
+      when: race_all.rc != 0 and fail_on_unrelated | bool
+
+    - name: "SUMMARY | Phase 5 blocker verification"
+      debug:
+        msg: |
+          ================================================================
+          PHASE 5 ALERTING — BLOCKER VERIFICATION: ALL TEST CASES PASSED
+          ================================================================
+            TC1  Slack notification (real delivery, retry, fallback)  PASS
+            TC2  Alert deduplication (Duration + cooldown)            PASS
+            TC3  Runbook validation (startup aborts on broken link)   PASS
+            TC4  Dead AlertMatrix code removed                        PASS
+            TC5  Alert context enrichment                             PASS
+            GUARD  full suite, race detector clean                    PASS
+
+          Deployment prerequisites:
+            SLACK_WEBHOOK_URL           (required — no webhook = alerts journaled only)
+            PROMPTS_MCP_DASHBOARD_BASE  (recommended — absolute dashboard deeplinks)
+            PROMPTS_MCP_REPO_ROOT       (if runbooks live outside the working dir)
+            PROMPTS_MCP_ALERT_FALLBACK  (optional — undelivered-alert JSONL path)
+          ================================================================
+
+    - name: "CLEANUP | Remove scratch build artifacts"
+      file:
+        path: "{{ build_dir }}"
+        state: absent

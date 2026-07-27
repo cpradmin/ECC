@@ -1,0 +1,109 @@
+{
+  "dashboard": {
+    "uid": "prompts-registry-health",
+    "title": "Prompts Registry Health",
+    "tags": ["prompts-mcp", "registry"],
+    "timezone": "UTC",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Total Prompts",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_registry_total",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": { "mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 2}, {"color": "green", "value": 5}] }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Average Confidence (All Prompts)",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_all_avg_confidence",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "unit": "percentunit",
+            "thresholds": { "mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 0.7}, {"color": "green", "value": 0.8}] }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Promoted Prompts Count",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_promoted_count",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": { "mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 1}, {"color": "green", "value": 5}] }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Confidence Evolution",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_all_avg_confidence",
+            "legendFormat": "All Prompts",
+            "refId": "A"
+          },
+          {
+            "expr": "prompts_registry_avg_confidence",
+            "legendFormat": "Registry (≥0.7)",
+            "refId": "B"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Registry Domains Count",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_registry_domains",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": { "mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 2}, {"color": "green", "value": 4}] }
+          }
+        }
+      }
+    ]
+  }
+}

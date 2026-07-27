@@ -1,0 +1,90 @@
+{
+  "dashboard": {
+    "uid": "prompts-governor-intelligence",
+    "title": "Prompts Governor Routing Intelligence",
+    "tags": ["prompts-mcp", "governor", "routing"],
+    "timezone": "UTC",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Feedback Success Rate",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_feedback_success_rate",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "unit": "percentunit",
+            "thresholds": { "mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 0.8}, {"color": "green", "value": 0.9}] }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Total Feedback Records",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_feedback_success_total + prompts_feedback_failure_total",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": { "mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 10}, {"color": "green", "value": 50}] }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Feedback Scrape Errors",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_feedback_scrape_errors_total",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": { "mode": "absolute", "steps": [{"color": "green", "value": 0}, {"color": "red", "value": 1}] }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Feedback Success vs Failure Over Time",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_feedback_success_total",
+            "legendFormat": "Success Count",
+            "refId": "A"
+          },
+          {
+            "expr": "prompts_feedback_failure_total",
+            "legendFormat": "Failure Count",
+            "refId": "B"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+[Unit]
+Description=Daily Prompts-MCP Training Pipeline
+Documentation=https://github.com/kntrnjb/prompts-mcp
+# The timer must not fire if the service has been masked/disabled.
+After=network-online.target
+Wants=network-online.target
+
+[Timer]
+# B5 FIX: exactly ONE OnCalendar directive.
+# systemd ACCUMULATES multiple OnCalendar= entries (they are additive, not
+# overriding), so the previous "OnCalendar=daily" + "OnCalendar=02:00" pair
+# fired the pipeline TWICE per day (00:00 and 02:00).
+# Setting OnCalendar= to the empty string first defensively resets any value
+# inherited from a drop-in, then we declare the single intended schedule.
+OnCalendar=
+OnCalendar=*-*-* 02:00:00
+
+# Spread load and avoid thundering-herd if more nodes are added later.
+RandomizedDelaySec=300
+# Keep the randomization stable per-machine so the run time is predictable.
+FixedRandomDelay=true
+
+# Run on next boot if the machine was off at 02:00.
+Persistent=true
+
+# Do not stack a catch-up run on top of an in-flight run.
+AccuracySec=1min
+
+Unit=prompts-mcp-daily.service
+
+[Install]
+WantedBy=timers.target

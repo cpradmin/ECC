@@ -1,0 +1,97 @@
+[Unit]
+Description=Prompts-MCP Daily Training Pipeline
+Documentation=https://github.com/kntrnjb/prompts-mcp
+After=network-online.target
+Wants=network-online.target
+
+# Do not even attempt the run if the API it drives is unreachable; the script
+# also probes /healthz itself, this is just a fast fail.
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+
+# --- Identity / privilege hardening -----------------------------------------
+# NOTE (deviation from spec, deliberate): the brief asked for User=prompts-mcp.
+# A fresh system user CANNOT run this pipeline: every input and output lives
+# under /home/kntrnjb --- the git checkout, the memory dir read by
+# memory-trainer, and the server state in ~/.local/share (feedback.jsonl,
+# trinity-facts.tsv). Running as root was the actual defect: with HOME=/root,
+# Python's Path.home() resolved to /root, so the 2026-07-26 run wrote its
+# output to /root/Projects/prompts-mcp/generated-prompts and generated 0
+# prompts. De-escalating to the account that owns the data fixes that bug and
+# removes root. Switch to a dedicated user only after relocating the data.
+User=kntrnjb
+Group=kntrnjb
+
+WorkingDirectory=/home/kntrnjb/Projects/prompts-mcp
+
+# systemd creates/chowns these to User= and exports the paths below.
+StateDirectory=prompts-mcp
+StateDirectoryMode=0750
+LogsDirectory=prompts-mcp
+LogsDirectoryMode=0750
+
+Environment=STATE_DIR=/var/lib/prompts-mcp
+Environment=LOG_DIR=/var/log/prompts-mcp
+# Lock lives in the persistent StateDirectory, NOT RuntimeDirectory: /run/...
+# is deleted when the unit stops, so a timer run and a manual run would take
+# two different locks and fail to exclude each other.
+Environment=LOCK_FILE=/var/lib/prompts-mcp/prompts-mcp-daily.lock
+Environment=API_BASE=http://localhost:8762
+Environment=MEMORY_DIR=/home/kntrnjb/.claude/projects/-home-kntrnjb/memory
+
+ExecStart=/usr/local/bin/prompts-mcp-daily.sh
+
+# --- Timeouts / concurrency --------------------------------------------------
+# Bound the whole run; Selah generation can hang on a stalled local model.
+TimeoutStartSec=600
+# On timeout, SIGTERM first so the script's trap can unwind, then SIGKILL.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# Belt-and-braces with the script's flock: systemd will not run two instances
+# of the same oneshot unit concurrently, but flock also covers manual runs.
+Restart=no
+
+# 0027 => new files are rw-r----- ; state must not be world-readable.
+UMask=0027
+
+# --- Sandboxing --------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+# ProtectHome=read-write is NOT valid (yes|no|read-only|tmpfs only). Home must
+# stay visible; ProtectSystem=strict already makes it read-only, and the
+# ReadWritePaths= below grant back exactly the paths the pipeline writes.
+ProtectHome=no
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# ProtectSystem=strict makes /usr and /etc read-only; these stay writable.
+ReadWritePaths=/home/kntrnjb/Projects/prompts-mcp
+ReadWritePaths=/home/kntrnjb/.local/share
+ReadWritePaths=/var/lib/prompts-mcp
+ReadWritePaths=/var/log/prompts-mcp
+ReadOnlyPaths=/home/kntrnjb/.claude/projects/-home-kntrnjb/memory
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=prompts-mcp-daily
+
+[Install]
+WantedBy=multi-user.target

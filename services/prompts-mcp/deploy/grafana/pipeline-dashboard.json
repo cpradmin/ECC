@@ -1,0 +1,72 @@
+{
+  "dashboard": {
+    "uid": "prompts-pipeline-health",
+    "title": "Prompts Daily Pipeline Health",
+    "tags": ["prompts-mcp", "pipeline", "automation"],
+    "timezone": "UTC",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "1m",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Service Uptime",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_uptime_seconds / 3600",
+            "legendFormat": "Hours",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "unit": "h",
+            "thresholds": { "mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 1}, {"color": "green", "value": 24}] }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "Total Prompts in Registry",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_registry_total",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": { "mode": "absolute", "steps": [{"color": "red", "value": 0}, {"color": "yellow", "value": 1}, {"color": "green", "value": 2}] }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Average Confidence Trend",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "prompts_all_avg_confidence",
+            "legendFormat": "All Prompts",
+            "refId": "A"
+          },
+          {
+            "expr": "prompts_registry_avg_confidence",
+            "legendFormat": "Registry (≥0.7)",
+            "refId": "B"
+          }
+        ]
+      }
+    ]
+  }
+}

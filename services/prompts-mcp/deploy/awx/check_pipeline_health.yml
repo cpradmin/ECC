@@ -1,0 +1,76 @@
+---
+- name: Prompts-MCP Daily Pipeline Health Check
+  hosts: localhost
+  gather_facts: no
+  vars:
+    pipeline_log_dir: "/var/log/prompts-mcp"
+    max_pipeline_duration_sec: 300
+
+  tasks:
+    - name: Find latest daily pipeline log
+      find:
+        paths: "{{ pipeline_log_dir }}"
+        patterns: "daily-*.log"
+        file_type: file
+      register: pipeline_logs
+
+    # I4 FIX: Explicitly check for pipeline logs before using
+    - name: Fail if no pipeline logs found
+      fail:
+        msg: "🔴 ERROR: No pipeline logs found in {{ pipeline_log_dir }}. Daily automation may not be running."
+      when: pipeline_logs.files | length == 0
+
+    - name: Get most recent pipeline log
+      set_fact:
+        latest_log: "{{ pipeline_logs.files | sort(attribute='mtime', reverse=true) | first }}"
+      when: pipeline_logs.files | length > 0
+
+    - name: Read latest pipeline log
+      slurp:
+        src: "{{ latest_log.path }}"
+      register: pipeline_log_content
+      when: latest_log is defined
+
+    - name: Parse pipeline results
+      set_fact:
+        log_content: "{{ pipeline_log_content.content | b64decode }}"
+      when:
+        - pipeline_log_content is not failed
+        - latest_log is defined
+
+    # I3 FIX: Parse JSON slog entries, check for ERROR level (not substring "failed")
+    - name: Check for pipeline errors (JSON parsing)
+      fail:
+        msg: "🔴 CRITICAL: Pipeline had ERROR entries in last run"
+      when:
+        - log_content is defined
+        - "'\"level\":\"ERROR\"' in log_content"
+
+    # I2 FIX: Add guard for latest_log before using it
+    - name: Log pipeline status
+      debug:
+        msg: |
+          Pipeline Health Check
+          Latest Log: {{ latest_log.path | basename }}
+          Last Modified: {{ latest_log.mtime | int | strftime('%Y-%m-%d %H:%M:%S') }}
+          ✅ No errors detected
+      when: latest_log is defined
+
+    # I2 FIX: Check pipeline frequency only if we have a log
+    # Note: ansible_date_time only available if gather_facts: yes, so use shell date instead
+    - name: Get current epoch time
+      command: date +%s
+      register: current_epoch
+      when: latest_log is defined
+
+    - name: Check pipeline frequency
+      debug:
+        msg: "⚠️  WARNING: No pipeline run in last 24 hours"
+      when:
+        - latest_log is defined
+        - current_epoch.stdout is defined
+        - (current_epoch.stdout | int) - (latest_log.mtime | int) > 86400
+
+    - name: Success message
+      debug:
+        msg: "✅ Pipeline health check passed. Daily automation running normally"
